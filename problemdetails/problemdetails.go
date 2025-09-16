@@ -11,14 +11,6 @@ import (
 	"net/http"
 )
 
-var (
-	GetStatusCode func(*http.Request) int
-	GetRequestID  func(*http.Request) string
-	GetTraceID    func(*http.Request) string
-
-	ProblemDetailsSchema = "" // The json schema for the problem details response. For example, https://www.rfc-editor.org/rfc/rfc9457.html#name-json-schema-for-http-proble.
-)
-
 // This is not meant to be used directly. Only read from if using `problemdetails.ProblemDetailsContext`.
 type ProblemDetails struct {
 	Schema string `json:"$schema,omitempty"`
@@ -44,7 +36,19 @@ type Error struct {
 	Code      string `json:"code,omitempty"`      // A string containing additional provider specific codes to identify the error context.
 }
 
-// Writes a problem details http response.
+var defaultWriter = &Writer{}
+
+// Default returns the default ProblemDetailsWriter.
+func Default() *Writer {
+	return defaultWriter
+}
+
+// SetDefault sets the default ProblemDetailsWriter to pdw, which is used by the top-level function Write.
+func SetDefault(pdw *Writer) {
+	defaultWriter = pdw
+}
+
+// Writes a problem details http response using the default problem details writer.
 //
 // detail: A human-readable explanation specific to this occurrence of the problem.
 //
@@ -54,6 +58,26 @@ type Error struct {
 //
 // Returns error if there were invalid arguments, but writes the problem details response either way.
 func Write(w http.ResponseWriter, r *http.Request, status int, detail string, code string, errors ...Error) error {
+	return Default().Write(w, r, status, detail, code, errors...)
+}
+
+type Writer struct {
+	GetCtxStatusCode     func(*http.Request) int    // A function that gets the status code for the current response from the request context in order to verify that it is the expected value. If nil, it won't be checked.
+	GetRequestID         func(*http.Request) string // A function that gets the request ID to write in the problem details response. If nil, the request ID field will be omitted.
+	GetTraceID           func(*http.Request) string // A function that gets the trace ID to write in the problem details response. If nil, the trace ID field will be omitted.
+	ProblemDetailsSchema string                     // The json schema for the problem details response. For example, https://www.rfc-editor.org/rfc/rfc9457.html#name-json-schema-for-http-proble. If "" the $schema field will be omitted.
+}
+
+// Writes a problem details http response.
+//
+// detail: A human-readable explanation specific to this occurrence of the problem.
+//
+// code: [Optional] An API specific error code aiding the provider team understand the error based on their own potential taxonomy or registry.
+//
+// errors: [Optional] An array of error details to accompany a problem details response.
+//
+// Returns error if there were invalid arguments, but writes the problem details response either way.
+func (pdw *Writer) Write(w http.ResponseWriter, r *http.Request, status int, detail string, code string, errors ...Error) error {
 	var typeUri string
 	switch status {
 	case http.StatusNotFound:
@@ -72,7 +96,7 @@ func Write(w http.ResponseWriter, r *http.Request, status int, detail string, co
 		typeUri = "about:blank"
 	}
 
-	pd, err := newProblemDetails(
+	pd, err := pdw.newProblemDetails(
 		r,
 		typeUri,
 		status,
@@ -95,20 +119,20 @@ func Write(w http.ResponseWriter, r *http.Request, status int, detail string, co
 	return err
 }
 
-func newProblemDetails(r *http.Request, typeUri string, status int, title string, detail string, code string, errors []Error) (*ProblemDetails, error) {
-	err := validateArgs(r, status, detail, code, errors)
+func (pdw *Writer) newProblemDetails(r *http.Request, typeUri string, status int, title string, detail string, code string, errors []Error) (*ProblemDetails, error) {
+	err := pdw.validateArgs(r, status, detail, code, errors)
 
 	requestId := ""
-	if GetRequestID != nil {
-		requestId = GetRequestID(r)
+	if pdw.GetRequestID != nil {
+		requestId = pdw.GetRequestID(r)
 	}
 	traceId := ""
-	if GetTraceID != nil {
-		traceId = GetTraceID(r)
+	if pdw.GetTraceID != nil {
+		traceId = pdw.GetTraceID(r)
 	}
 
 	pd := &ProblemDetails{
-		Schema: ProblemDetailsSchema,
+		Schema: pdw.ProblemDetailsSchema,
 		Type:   typeUri,
 		Status: status,
 		Title:  title,
@@ -124,15 +148,15 @@ func newProblemDetails(r *http.Request, typeUri string, status int, title string
 	return pd, err
 }
 
-func validateArgs(r *http.Request, status int, detail string, code string, errors []Error) error {
+func (pdw *Writer) validateArgs(r *http.Request, status int, detail string, code string, errors []Error) error {
 	var errStatus error
 	if status < 100 || status > 599 {
 		errStatus = fmt.Errorf("invalid http status code: %d", status)
 	}
 
 	var errCtxStatus error
-	if GetStatusCode != nil {
-		if ctxStatus := GetStatusCode(r); ctxStatus != status {
+	if pdw.GetCtxStatusCode != nil {
+		if ctxStatus := pdw.GetCtxStatusCode(r); ctxStatus != status {
 			errCtxStatus = fmt.Errorf("unexpected http status code from request context: %d, expected: %d", ctxStatus, status)
 		}
 	}
