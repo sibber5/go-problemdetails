@@ -94,7 +94,6 @@ func Write(w http.ResponseWriter, r *http.Request, status int, detail string, co
 }
 
 type Writer struct {
-	GetCtxStatusCode     func(*http.Request) int    // A function that gets the status code for the current response from the request context in order to verify that it is the expected value. If nil or if the returned value is 0, it won't be checked.
 	GetRequestID         func(*http.Request) string // A function that gets the request ID to write in the problem details response. If nil or if the returned value is "", the request ID field will be omitted.
 	GetTraceID           func(*http.Request) string // A function that gets the trace ID to write in the problem details response. If nil or if the returned value is "", the trace ID field will be omitted.
 	ProblemDetailsSchema string                     // The json schema for the problem details response. For example, https://www.rfc-editor.org/rfc/rfc9457.html#name-json-schema-for-http-proble. If "" the $schema field will be omitted.
