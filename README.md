@@ -42,17 +42,41 @@ Converts all error responses (status >= 400) to Problem Details if not already (
 
 ```go
 problemdetails.ProblemDetailsConverter(func(r *http.Request, status int) {
-    // Log conversion
+    // This runs when an error response is intercepted and converted.
+    slog.InfoContext(r.Context(), "Intercepted error response", "status", status)
 })
 ```
 
+This middleware - like request loggers for example - processes *after* it calls `next.ServeHTTP`, meaning the earlier you register it, the later it runs.  
+It must be registered as early as possible, after middlewares that inject context like request IDs, and before any other middleware that also runs after serving, including request loggers.
+
 #### Recoverer
 
-Recovers from panics and writes a Problem Details response.
+Recovers from panics and writes a Problem Details response.  
+It should be registered as early as possible.
 
 #### ProblemDetailsContext
 
 Injects a context object to retrieve the problem details written to the response for failed requests.
+
+#### Example of middleware order
+
+```go
+r.Use(middleware.RequestID)
+r.Use(problemdetails.ProblemDetailsContext)
+
+// Should be before the request logger to let the request logger log the panic. skip 3 frames for the request logger.
+// You can register the recoverer after the ProblemDetailsConverter. It doesn't matter since the recoverer already write problem details responses so the ProblemDetailsConverter will not intercept them.
+r.Use(problemdetails.Recoverer(3))
+
+// Since this wraps (processes after it calls next.ServeHTTP), it will actually run *after* anything below it.
+r.Use(problemdetails.ProblemDetailsConverter(func(r *http.Request, status int) {
+    slog.InfoContext(r.Context(), "Intercepted non-problem details error response", "status", status, "path", getRequestPath(r))
+}))
+
+// The request logger can catch panics to log them, and re-panic for problem details recovrer to catch.
+r.Use(requestLogger)
+```
 
 ### Configuration
 

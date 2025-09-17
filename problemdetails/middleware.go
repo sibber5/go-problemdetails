@@ -17,6 +17,8 @@ import (
 //
 // stackFrameIdx: The index of the caller in the stack frame to include in the details field in the response body.
 // If < 0 then it wond be included. Note that the actual index used is actually stackFrameIdx + 3 in order to skip the frames for this middleware and runtime/panic.go.
+//
+// The recoverer should be registered as early as possible.
 func Recoverer(stackFrameIdx int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,12 +65,20 @@ type ctxKey string
 var CtxKey = ctxKey("problemdetails")
 
 type Context struct {
-	pd *ProblemDetails
+	pd           *ProblemDetails
+	respWriteErr error
 }
 
 // Details returns the problem details object written to the current response body if one was written, otherwise nil.
+// If an error occured while writing the problem details response, this method still returns the problem details object that was attempted to be written.
+// Check RespWriteError to see if it was written successfully.
 func (c *Context) Details() *ProblemDetails {
 	return c.pd
+}
+
+// RespWriteError returns the error that occured when writing the problem details response if one occured, otherwise nil.
+func (c *Context) RespWriteError() error {
+	return c.respWriteErr
 }
 
 // ProblemDetailsContext is a middleware that injects a `*problemdetails.Context` object with key `problemdetails.CtxKey` into
@@ -88,8 +98,13 @@ func ProblemDetailsContext(next http.Handler) http.Handler {
 // and converts them to RFC 9457 compliant problem detail responses if they are not already
 // (by checking if the Content-Type starts with "application/problem+json").
 //
-// logCallback: a function to be called with the request and status code when an error response is intercepted and converted.
-func ProblemDetailsConverter(logCallback func(r *http.Request, status int)) func(http.Handler) http.Handler {
+// callback: a function to be called with the request and status code when an error response is intercepted and converted.
+//
+// This middleware - like request loggers for example - processes *after* it calls next.ServeHTTP, meaning the earlier you register it,
+// the later it runs.
+// It must be registered as early as possible, after middlewares that inject context like request IDs, and before any other
+// middleware that also runs after serving, including request loggers.
+func ProblemDetailsConverter(callback func(r *http.Request, status int)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ri := interceptorPool.Get().(*responseInterceptor)
@@ -109,7 +124,7 @@ func ProblemDetailsConverter(logCallback func(r *http.Request, status int)) func
 
 				Write(w, r, ri.status, "", "")
 
-				logCallback(r, ri.status)
+				callback(r, ri.status)
 				return
 			}
 

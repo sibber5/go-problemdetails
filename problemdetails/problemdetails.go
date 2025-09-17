@@ -6,8 +6,6 @@ package problemdetails
 import (
 	"bytes"
 	"encoding/json"
-	errs "errors"
-	"fmt"
 	"net/http"
 )
 
@@ -36,6 +34,40 @@ type Error struct {
 	Code      string `json:"code,omitempty"`      // A string containing additional provider specific codes to identify the error context.
 }
 
+// pointer: A JSON Pointer to a specific request body property that is the source of error.
+//
+// detail: A granular description on the specific error related to the body property.
+//
+// code: A string containing additional provider specific codes to identify the error context.
+func NewBodyError(pointer string, detail string, code string) Error {
+	return Error{Pointer: pointer, Detail: detail, Code: code}
+}
+
+// parameter: The name of the query or path parameter that is the source of error.
+//
+// detail: A granular description on the specific error related to the query parameter.
+//
+// code: A string containing additional provider specific codes to identify the error context.
+func NewParameterError(parameter string, detail string, code string) Error {
+	return Error{Parameter: parameter, Detail: detail, Code: code}
+}
+
+// header: The name of the header that is the source of error.
+//
+// detail: A granular description on the specific error related to the header.
+//
+// code: A string containing additional provider specific codes to identify the error context.
+func NewHeaderError(header string, detail string, code string) Error {
+	return Error{Header: header, Detail: detail, Code: code}
+}
+
+// detail: A granular description on the specific error related to a body property, query parameter, path parameters, header, or whatever else the cause is.
+//
+// code: A string containing additional provider specific codes to identify the error context.
+func NewGenericError(detail string, code string) Error {
+	return Error{Detail: detail, Code: code}
+}
+
 var defaultWriter = &Writer{}
 
 // Default returns the default ProblemDetailsWriter.
@@ -57,14 +89,14 @@ func SetDefault(pdw *Writer) {
 // errors: [Optional] An array of error details to accompany a problem details response.
 //
 // Returns error if there were invalid arguments, but writes the problem details response either way.
-func Write(w http.ResponseWriter, r *http.Request, status int, detail string, code string, errors ...Error) error {
-	return Default().Write(w, r, status, detail, code, errors...)
+func Write(w http.ResponseWriter, r *http.Request, status int, detail string, code string, errors ...Error) {
+	Default().Write(w, r, status, detail, code, errors...)
 }
 
 type Writer struct {
-	GetCtxStatusCode     func(*http.Request) int    // A function that gets the status code for the current response from the request context in order to verify that it is the expected value. If nil, it won't be checked.
-	GetRequestID         func(*http.Request) string // A function that gets the request ID to write in the problem details response. If nil, the request ID field will be omitted.
-	GetTraceID           func(*http.Request) string // A function that gets the trace ID to write in the problem details response. If nil, the trace ID field will be omitted.
+	GetCtxStatusCode     func(*http.Request) int    // A function that gets the status code for the current response from the request context in order to verify that it is the expected value. If nil or if the returned value is 0, it won't be checked.
+	GetRequestID         func(*http.Request) string // A function that gets the request ID to write in the problem details response. If nil or if the returned value is "", the request ID field will be omitted.
+	GetTraceID           func(*http.Request) string // A function that gets the trace ID to write in the problem details response. If nil or if the returned value is "", the trace ID field will be omitted.
 	ProblemDetailsSchema string                     // The json schema for the problem details response. For example, https://www.rfc-editor.org/rfc/rfc9457.html#name-json-schema-for-http-proble. If "" the $schema field will be omitted.
 }
 
@@ -77,7 +109,7 @@ type Writer struct {
 // errors: [Optional] An array of error details to accompany a problem details response.
 //
 // Returns error if there were invalid arguments, but writes the problem details response either way.
-func (pdw *Writer) Write(w http.ResponseWriter, r *http.Request, status int, detail string, code string, errors ...Error) error {
+func (pdw *Writer) Write(w http.ResponseWriter, r *http.Request, status int, detail string, code string, errors ...Error) {
 	var typeUri string
 	switch status {
 	case http.StatusNotFound:
@@ -96,7 +128,7 @@ func (pdw *Writer) Write(w http.ResponseWriter, r *http.Request, status int, det
 		typeUri = "about:blank"
 	}
 
-	pd, err := pdw.newProblemDetails(
+	pd := pdw.newProblemDetails(
 		r,
 		typeUri,
 		status,
@@ -106,22 +138,16 @@ func (pdw *Writer) Write(w http.ResponseWriter, r *http.Request, status int, det
 		errors,
 	)
 
-	marshalJSON(w, pd)
+	err := marshalJSON(w, pd)
 
 	pdCtx, ok := r.Context().Value(CtxKey).(*Context)
 	if ok {
 		pdCtx.pd = pd
+		pdCtx.respWriteErr = err
 	}
-
-	// if err != nil {
-	// 	slog.WarnContext(r.Context(), fmt.Sprintf("Problem details validation failed:\n%s", err.Error()))
-	// }
-	return err
 }
 
-func (pdw *Writer) newProblemDetails(r *http.Request, typeUri string, status int, title string, detail string, code string, errors []Error) (*ProblemDetails, error) {
-	err := pdw.validateArgs(r, status, detail, code, errors)
-
+func (pdw *Writer) newProblemDetails(r *http.Request, typeUri string, status int, title string, detail string, code string, errors []Error) *ProblemDetails {
 	requestId := ""
 	if pdw.GetRequestID != nil {
 		requestId = pdw.GetRequestID(r)
@@ -145,53 +171,20 @@ func (pdw *Writer) newProblemDetails(r *http.Request, typeUri string, status int
 		Errors: errors,
 	}
 
-	return pd, err
+	return pd
 }
 
-func (pdw *Writer) validateArgs(r *http.Request, status int, detail string, code string, errors []Error) error {
-	var errStatus error
-	if status < 100 || status > 599 {
-		errStatus = fmt.Errorf("invalid http status code: %d", status)
-	}
-
-	var errCtxStatus error
-	if pdw.GetCtxStatusCode != nil {
-		if ctxStatus := pdw.GetCtxStatusCode(r); ctxStatus != status {
-			errCtxStatus = fmt.Errorf("unexpected http status code from request context: %d, expected: %d", ctxStatus, status)
-		}
-	}
-
-	var errDetail error
-	const detailMaxLen = 1024
-	if len(detail) > detailMaxLen {
-		errDetail = fmt.Errorf("argument 'detail' is too long: %d, max length: %d", len(detail), detailMaxLen)
-	}
-
-	var errCode error
-	const codeMaxLen = 50
-	if len(code) > codeMaxLen {
-		errCode = fmt.Errorf("argument 'code' is too long: %d, max length: %d", len(code), codeMaxLen)
-	}
-
-	var errErrors error
-	const errorsMaxLen = 1000
-	if len(errors) > errorsMaxLen {
-		errErrors = fmt.Errorf("argument 'errors' has too many items: %d, max length: %d", len(errors), errorsMaxLen)
-	}
-
-	return errs.Join(errStatus, errCtxStatus, errDetail, errCode, errErrors)
-}
-
-func marshalJSON(w http.ResponseWriter, pd *ProblemDetails) {
+func marshalJSON(w http.ResponseWriter, pd *ProblemDetails) error {
 	buf := &bytes.Buffer{}
 	enc := json.NewEncoder(buf)
 	enc.SetEscapeHTML(true)
 	if err := enc.Encode(pd); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return err
 	}
 
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(pd.Status)
-	w.Write(buf.Bytes()) //nolint:errcheck
+	_, err := w.Write(buf.Bytes())
+	return err
 }
